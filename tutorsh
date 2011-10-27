@@ -1,0 +1,487 @@
+#!/bin/bash
+#
+# Copyright © Christian Burkert <christian@3burkert.de>
+#
+# Dedicated to all the tutors, who know the pain of staring
+# at foreign source code.
+
+##
+# Customized Settings
+##
+
+# File used for grading notes and annotations.
+# Opened for editing with the 's' shortcut.
+# SUMMARY is expected to be a path relative to the students
+#    directory */asst?/<immno>/
+#    You may use as placeholders:
+#    - '\${immno}' for immatriculation number of current student
+#    - no more so far ;-)
+# SUMTEMP is the template used to initally create the SUMMARY file
+# for each student.
+SUMMARY="\${immno}_summary.txt"
+SUMTEMP="template_summary.txt"
+
+# To protect your work againt malicious or destructive code
+# you may work as a different user with restricted rights.
+# This user would have write privileges to the working directory
+# but not the the submission of other students or saved corrections
+# saved on switching the student.
+# He should be part of the group CORRECTGRP as well as the calling user.
+CORRECTOR=""
+CORRECTGRP=""
+
+# For additional protection you may specify a script/program
+# which is invoked on switches with set save flag (ns or ps)
+# Set BACKUP_USER to run it in the name of the specified user.
+BACKUP_SCRIPT=""
+BACKUP_USER=""
+
+# Define your difference viewer of choice.
+SHOWDIFF="vimdiff"
+
+## End of customizing
+
+PROG="${0##*/}"
+VERSION="1.0"
+
+##
+# Functions
+##
+
+function usage() {
+	cat <<-EOF
+	usage: $PROG [path]
+
+	Start a correction session of $PROG.
+	The current working directory or the optional path argument have to
+	point to the base directory containing the students' submissions or
+	any subdirectory. The latter causes the session to start at the
+	subdirectory instead of the lowest matriculation number.
+
+	$PROG provides to following builtin commands:
+	  Navigation
+	    n, ns     Switch to the next student's submission.
+	    p, ps     Switch to the previous student's submission.
+	           The .s versions additionally invokes a backup procedure
+	           and sets the last mark [see b])
+	    b         Switch back to the last marked submission.
+	    q         Quit $PROG.
+
+	  Bookmarking
+	    bookmark  Create a bookmark for the current working directory.
+	    showbookmarks [all]
+	              List the bookmarks related to the current submission
+	              or all marks if any argument was given.
+	    gotobookmark
+	              Ask for selecting a bookmark and switch to its directory.
+	    delbookmark NUMBER
+	              Delete the bookmark with the given NUMBER.
+	
+	  Modification Management
+	    showmods  Show the differences between the original submission
+	              and the current version.
+	    delmod FILE...
+	              Discard the modifications made to the given FILE(s)
+	              and restore the originally submitted version.
+	    useorig FILE...
+	              Restore the originally submitted versions of the given
+	              files but keep the modification for later sessions.
+
+	  Other Shortcuts
+	    m         Alias for make -f tutor
+	    c         Alias for make -f tutor clean
+	    s         Edit the grading summary specified by SUMMARY
+	              [edit script for customization].
+	EOF
+}
+
+# Tokenise path
+function chopPath() {
+	local path=${1:?missing path}
+	[ "${path:0:1}" != "/" ] && path="$PWD/$path"
+	[ "${path:0 - 1}" != "/" ] && path="$path/"
+	postPath="${path#*asst?/}"
+	BASE="${path%$postPath}"
+	BASE="${BASE%/}" # remove trailing slash
+	immno="${postPath%%/*}"
+	postPath="${postPath#$immno/}"
+	#echo "choped: $BASE $immno $postPath"
+}
+
+# Wrapper for uid switching.
+# Preference is sudo, fallback su.
+function doas () {
+	local comm=${1:?missing command}
+	local user=${2:?missing user}
+
+	if [ "$user" == `whoami` ]; then
+		eval "$comm"
+		return
+	fi
+
+	if command -v sudo &>/dev/null && [ -z "$nosudo" ]; then
+		# sudo is available
+		# need to check if we are in sudoers
+		if sudo -l &>/dev/null; then
+			sudo -u "$user" bash -c "$comm"
+			return
+		else
+			# remember that we're not in sudoers
+			nosudo="yes"
+			echo "Not a sudoer. Use su instead" >&2
+		fi
+	fi
+
+	su -c "$comm" "$user"
+}
+
+function confirm () {
+	local ans
+	read -p "${1:?missing argument} [y|N] " -n 1 ans
+	echo
+	[ "$ans" == "y" ]
+}
+
+####
+####
+
+# print usage info when help is requested
+if [ "$1" == "--help" -o "$1" == "-h" ]; then
+	usage
+	exit 0
+fi
+
+
+# set paths
+path="${1:-$PWD}"
+chopPath "$path"
+if [ -z "$BASE" ]; then
+	echo "Cannot find assignment directory" >&2
+	exit 1
+fi
+LAST="$BASE/.last"
+BOOKMARKS="$BASE/.bookmarks"
+RC=`mktemp`
+tmpRC=`mktemp`
+WD="$BASE/workspace"
+SUITE="$BASE/suite"
+MODABLE="$SUITE/modifiable-tutor"
+GOTO_FILE=`mktemp`
+
+# exit code flags used for navigation
+let FWD_FLAG=0x1
+let REW_FLAG=0x2
+let SAVE_FLAG=0x4
+let GOTO_FLAG=0x8
+let GOBACK_FLAG=0x10
+
+# Build bashrc file
+cat "$HOME/.bashrc" > "$RC"
+cat <<EOF >> "$RC"
+	readonly BASE="$BASE"
+	readonly WD="$WD"
+
+	# aliases for navigation
+	alias ns='exit $(( $FWD_FLAG | $SAVE_FLAG )) 2>/dev/null'
+	alias n='nosave=yes && exit $(( $FWD_FLAG )) 2>/dev/null'
+	alias ps='exit $(( $REW_FLAG | $SAVE_FLAG )) 2>/dev/null'
+	alias p='nosave=yes && exit $(( $REW_FLAG )) 2>/dev/null'
+	alias b='nosave=yes && exit $(( $GOBACK_FLAG )) 2>/dev/null'
+	alias q='exit 0 2>/dev/null'
+
+	# aliases for make
+	alias m='make -f tutor.mk'
+	alias c='make -f tutor.mk clean'
+
+	# wrapper for cd to change absolute paths in relative ones
+	# We may not have permissions for absolute path changes
+	# because of missing execute rights in parent dirs.
+	# Therefore we convert the pathes to stay in our 'jail'.
+	function getrelpath () {
+		[ "\${1:0:1}" != "/" ] && echo "\$1" && return # already relative
+		local path=\${1/\/\///} # replace double slashes by one slash
+		local cwdDepth=\`grep -o "/" <<<"\${PWD#\$BASE}" | wc -l\`
+		local relpath=\${path#\$BASE}
+		while (( cwdDepth-- > 0 )); do relpath="/..\$relpath"; done
+		relpath=".\$relpath"
+		echo "\$relpath"
+	}
+	function cd () {
+		local rel=\`getrelpath "\$1"\`
+		[ "\$1" == "-" ] && rel="-"
+		builtin cd "\$rel"
+	}
+
+	# function for editing grading summary
+	function s () {
+		local spath=\`getrelpath "\$WD/$SUMMARY"\`
+		[ -r "\$spath" ] && editor "\$spath" \
+		|| echo "\$spath not found" >&2
+	}
+
+	# save last working directory for later continuation
+	function savelastwd () {
+		local relwd="\$immno/\${PWD#\$WD}"
+		echo "\${relwd/\/\///}" > \`getrelpath "$LAST"\`
+	}
+	# save WD on any navigation with exit codes
+	trap -- "[ -z \"\\\$nosave\" ] && savelastwd" EXIT
+
+	# functions for modification handling
+	# show diffs of all modifications on current student
+	function showmods () {
+		oldold="\$OLDPWD"
+		cd "\$BASE/\$immno"
+		local f
+		for f in \`find . -name "*.mod"\`; do
+			diff -p "\${f%.mod}" "\$f"
+		done | pager
+		cd "\$OLDPWD"
+		OLDPWD="\$oldold"
+	}
+	# delete a modification permanently
+	function delmod () {
+		[ \$# -lt 1 ] && echo "usage: delmod FILE..." >&2 && return 1
+		local f
+		for f in \$@; do
+			local mpath=\`getrelpath "\$BASE/\$immno/\${PWD#\$WD}/\${f}.mod"\`
+			[ -f "\$mpath" ] && rm "\$mpath" \
+			|| echo "no modification for \$f" >&2
+		done
+	}
+	# check out original version submitted by student
+	function useorig () {
+		[ \$# -lt 1 ] && echo "usage: useorig FILE..." >&2 && return 1
+		local f
+		for f in \$@; do
+			local opath=\`getrelpath "\$BASE/\$immno/\${PWD#\$WD}/\$f"\`
+			[ -f "\$opath" ] && ! diff -q "\$f" "\$opath" >/dev/null \
+			&& cp "\$opath" "\$f" \
+			|| echo "no modification for \$f" >&2
+		done
+	}
+
+	# functions for bookmarking
+	function markpath () { echo \`getrelpath "$BOOKMARKS"\`; }
+	function bookmark () {
+		local path="\$immno/\${PWD#\$WD}"
+		local note
+		read -p "Note: " note \
+		&& echo -e "\${path/\/\///}: \$note" >> "\`markpath\`" \
+		|| echo "bookmarking aborted" >&2
+	}
+	# show bookmarks related to current student or all if argument is passed
+	function showbookmarks () {
+		local pat="\$immno"
+		[ -n "\$1" ] && pat="."
+		grep -nT "." "\`markpath\`" 2>/dev/null | grep -v ":d$" \
+		| grep "\$pat" 2>/dev/null \
+		|| echo "no bookmarks found" >&2
+	}
+	# lists and goes to selected bookmark
+	function gotobookmark () {
+		showbookmarks all
+		local lineno
+		read -p "Select mark (empty cancels): " lineno
+		let lineno="\$lineno" 2>/dev/null || return 1
+		[ "\$lineno" -lt 0 -o \
+		"\$lineno" -gt \`cat \\\`markpath\\\` | wc -l\` ] \
+			&& echo "invalid no." >&2 && return 2
+		[ "\$lineno" -eq 0 ] && return 0
+		local mark=\`sed -n "\${lineno}p;" "\\\`markpath\\\`"\`
+		[ "\$mark" == "d" ] && echo "invalid no." >&2 && return 3
+		local markeddir="\${mark%%:*}"
+		(cd "\$BASE" && [ ! -d "\$markeddir" ]) \
+			&& echo "invalid mark" >&2 && return 4
+		echo "\$markeddir" > "$GOTO_FILE"
+		exit $(( GOTO_FLAG )) 2>/dev/null
+	}
+	# delete specified bookmark
+	function delbookmark () {
+		[ \$# -lt 1 ] && echo "usage: delbookmark number" >&2 && return 1
+		[ "\$1" -lt 1 -o "\$1" -gt \`cat "\\\`markpath\\\`" | wc -l\` ] \
+			&& echo "invalid no." >&2 && return 2
+		echo -e "\$1c\nd\n.\nwq" | ed "\`markpath\`" &>/dev/null \
+			|| echo "deletion failed" >&2
+	}
+EOF
+trap "rm -f '$RC' '$tmpRC' '$GOTO_FILE'" EXIT
+
+if [ ! -d "$SUITE" ]; then
+	echo "Error: Cannot find sample solution: $SUITE" >&2
+	exit 2
+fi
+
+# assert that CORRECTOR is member of CORRECTGRP
+if [ -n "$CORRECTOR" ] && ! groups "$CORRECTOR" | grep -q "$CORRECTGRP"; then
+	echo "Error: $CORRECTOR is not member of $CORRECTGRP" >&2
+	exit 3
+fi
+
+cd "$BASE"
+
+# start at the least immatricualation number if nothing else specified
+if [ -z "$immno" ]; then
+	immno=`ls -d 1* | head -n 1` || exit 23
+fi
+
+next="$immno/$postPath"
+
+# check for old sessions
+touch "$LAST"
+lastdir=`cat "$LAST"`
+if [ -n "$lastdir" ]; then
+	echo "Last session: $lastdir"
+	if confirm "Continue last session?"; then
+		> "$LAST"
+		if [ ! -d "$BASE/$last" ]; then
+			echo "invalid session information" >&2
+			exit 2
+		fi
+		next="$lastdir"
+	fi
+fi
+chopPath "$next"
+
+let leave=0
+while [ $leave -ne 1 ]; do
+	immno="${next%%/*}"
+
+	# setup workspace
+	rm -rf "$WD"
+	mkdir "$WD"
+
+	# create summary file in student's directory (if needed)
+	[ -n "$SUMTEMP" ] && cp -n "$SUMTEMP" "$immno/`eval echo \"$SUMMARY\"`"
+	# copy summary into WD
+	cp "$immno/`eval echo \"$SUMMARY\"`" "$WD"
+
+	if [ -n "$CORRECTGRP" ]; then
+		chgrp -R "$CORRECTGRP" "$BASE"
+		touch "$BOOKMARKS"
+		chmod -R g=rX "$BASE" # protect originals
+		chmod g+w "$BOOKMARKS" "$LAST" # writing bookmarks, saving last dir
+		chmod o+t "$BASE" # prevent bookmark file from deletion
+		chgrp "$CORRECTGRP" "$WD" "$tmpRC" "$GOTO_FILE" || exit 23
+		chmod g+rwxs,o+t "$WD" || exit 23
+		chmod g=r "$tmpRC"
+		chmod g=rw "$GOTO_FILE"
+	fi
+
+	# copy next students solution into workspace
+	# prefer the file modified by tutor '.mod' if available
+	cd "$BASE/$immno"
+	for d in `find . -type d`; do
+		mkdir -p "$WD/$d"
+	done
+	for f in `find . -type f`; do
+		bn="${f##*/}"
+		[ ${bn:0:1} == "." -o "${bn:0 - 4}" == ".mod" ] && continue
+		[ -r "${f}.mod" ] && src="${f}.mod" || src="$f"
+		cp "$src" "$WD/$f"
+	done
+
+	# look for forbidden modifications
+	cd "$WD"
+	for f in `find . -type f`; do
+		#bn="${f##*/}" && [ ${bn:0:1} == "." ] && continue
+		of="$SUITE/$f"
+		if [ -f "$of" ] && ! diff -q "$f" "$of" >/dev/null \
+				&& ! grep -q "$f" "$MODABLE"; then
+			echo "$f was modified against orders"
+			confirm "Show difference?" && $SHOWDIFF "$f" "$of"
+		fi
+	done
+
+	# copy suite into workspace and replace 'unmodifiable' files
+	cd "$SUITE"
+	for f in `find . -type f`; do
+		bn="${f##*/}" && [ ${bn:0:1} == "." ] && continue
+		[ "$f" -ef "$MODABLE" ] && continue # don't copy MODABLE file
+		if ! grep -q "$f" "$MODABLE"; then
+			cp --preserve=mode "$f" "$WD/$f"
+		fi
+	done
+
+	# make WD group-writeable if CORRECTOR is used
+	[ -n "$CORRECTOR" ] && chmod -R g+rwX "$WD"
+
+	# check if there is really such a (sub-)directory
+	# maybe this subtask was not submitted
+	# Didn't use postPath to handle gotos in the same case
+	cd "$WD"
+	workpath="${next#*/}"
+	if [ -n "$workpath" -a ! -d "$workpath" ]; then
+		echo "couldn't find: $workpath"
+		# switch to parent dir which should exist
+		workpath="${workpath%/*}"
+	fi
+	cd "$workpath"
+
+	# start correction session
+	echo -e "export immno='$immno'\nexport PS1='$immno: \W\$ '" \
+		| cat "$RC" - > "$tmpRC"
+	if [ -n "$CORRECTOR" ]; then
+		doas "bash --init-file '$tmpRC'" "$CORRECTOR"
+	else
+		bash --init-file "$tmpRC"
+	fi
+	ret=$?
+
+	# save modified files
+	cd "$WD"
+	for f in `find . -type f`; do
+		bn="${f##*/}" && [ ${bn:0:1} == "." ] && continue
+		of="$BASE/$immno/$f"
+		if [ -f "$of" ] && ! diff -q "$f" "$of" >/dev/null; then
+			cp "$f" "${of}.mod"
+		fi
+	done
+	# save summary updates
+	cp -u `eval echo \"$SUMMARY\"` "$BASE/$immno/`eval echo \"$SUMMARY\"`"
+
+	# query next and previous immatriculation number
+	cd "$BASE"
+	prevMatr=`ls -d 1* | sort | sed -n "/$immno/{g;1!p;};h"`
+	nextMatr=`ls -d 1* | sort | sed -n "/$immno/{n;p;}"`
+
+	# analyse exit code
+	if (( ret & GOTO_FLAG )); then
+		# read goto destination out of file
+		next=`cat "$GOTO_FILE"`
+	elif (( ret & GOBACK_FLAG )); then
+		lastdir=`cat "$LAST"`
+		if [ -n "$lastdir" ]; then
+			next="$lastdir"
+		else
+			echo "no history" >&2
+		fi
+	elif (( ret & FWD_FLAG )); then
+		# switch to the next (if available)
+		if [ -n "$nextMatr" ]; then
+			next="$nextMatr/$postPath"
+		else
+			echo "no next" >&2
+		fi
+	elif (( ret & REW_FLAG )); then
+		# switch to previous (if available)
+		if [ -n "$prevMatr" ]; then
+			next="$prevMatr/$postPath"
+		else
+			echo "no previous" >&2
+		fi
+	else
+		leave=1
+		continue
+	fi
+
+	if (( ret & SAVE_FLAG )) && [ -n "$BACKUP_SCRIPT" ]; then
+		# backup
+		doas "$BACKUP_SCRIPT" "$BACKUP_USER" \
+		&& echo "> backup done" || echo "> backup failed"
+	fi
+done
+
+rm -f "$RC" "$tmpRC" "$GOTO_FILE"
+
+exit 0
