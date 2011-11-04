@@ -5,44 +5,8 @@
 # Dedicated to all the tutors, who know the pain of staring
 # at foreign source code.
 
-##
-# Customized Settings
-##
-
-# File used for grading notes and annotations.
-# Opened for editing with the 's' shortcut.
-# SUMMARY is expected to be a path relative to the students
-#    directory */asst?/<immno>/
-#    You may use as placeholders:
-#    - '\${immno}' for immatriculation number of current student
-#    - no more so far ;-)
-# SUMTEMP is the template used to initally create the SUMMARY file
-# for each student.
-SUMMARY="\${immno}_summary.txt"
-SUMTEMP="template_summary.txt"
-
-# To protect your work againt malicious or destructive code
-# you may work as a different user with restricted rights.
-# This user would have write privileges to the working directory
-# but not the the submission of other students or saved corrections
-# saved on switching the student.
-# He should be part of the group CORRECTGRP as well as the calling user.
-CORRECTOR=""
-CORRECTGRP=""
-
-# For additional protection you may specify a script/program
-# which is invoked on switches with set save flag (ns or ps)
-# Set BACKUP_USER to run it in the name of the specified user.
-BACKUP_SCRIPT=""
-BACKUP_USER=""
-
-# Define your difference viewer of choice.
-SHOWDIFF="vimdiff"
-
-## End of customizing
-
 PROG="${0##*/}"
-VERSION="1.0"
+VERSION="1.1"
 
 ##
 # Functions
@@ -151,6 +115,13 @@ if [ "$1" == "--help" -o "$1" == "-h" ]; then
 	exit 0
 fi
 
+# read configuration file - simple solution using bash source include
+CFGFILE="$HOME/.tutorsh.cfg"
+if [ ! -r "$CFGFILE" ]; then
+	echo "Cannot find configuration file $CFGFILE" >&2
+	exit 1
+fi
+source "$CFGFILE"
 
 # set paths
 path="${1:-$PWD}"
