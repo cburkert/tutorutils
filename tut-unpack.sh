@@ -76,7 +76,7 @@ while [ $# -gt 1 ]; do
 	{
 		tar --extract --auto-compress $overwrite --directory $DST \
 			--file $arc 2>/dev/null || echo "$arc extraction failed";
-	} |& errlog
+	} 2>&1 | errlog
 done
 
 exit 0
