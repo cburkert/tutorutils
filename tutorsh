@@ -6,7 +6,8 @@
 # at foreign source code.
 
 PROG="${0##*/}"
-VERSION="1.1"
+VERSION="1.2"
+
 
 ##
 # Functions
@@ -64,12 +65,12 @@ function chopPath() {
 	local path=${1:?missing path}
 	[ "${path:0:1}" != "/" ] && path="$PWD/$path"
 	[ "${path:0 - 1}" != "/" ] && path="$path/"
+	path="${path/\/.\///}" # remove useless dots
 	postPath="${path#*asst?/}"
 	BASE="${path%$postPath}"
 	BASE="${BASE%/}" # remove trailing slash
 	immno="${postPath%%/*}"
 	postPath="${postPath#$immno/}"
-	#echo "choped: $BASE $immno $postPath"
 }
 
 # Wrapper for uid switching.
@@ -323,7 +324,14 @@ while [ $leave -ne 1 ]; do
 	mkdir "$WD"
 
 	# create summary file in student's directory (if needed)
-	[ -n "$SUMTEMP" ] && cp -n "$SUMTEMP" "$immno/`eval echo \"$SUMMARY\"`"
+	if [ -n "$SUMTEMP" ]; then
+		if [ -r "$SUMTEMP" ]; then
+			cp -n "$SUMTEMP" "$immno/`eval echo \"$SUMMARY\"`"
+		else
+			echo "Cannot find summary template $SUMTEMP" >&2
+			exit 1
+		fi
+	fi
 	# copy summary into WD
 	cp "$immno/`eval echo \"$SUMMARY\"`" "$WD"
 
@@ -370,7 +378,8 @@ while [ $leave -ne 1 ]; do
 		bn="${f##*/}" && [ ${bn:0:1} == "." ] && continue
 		[ "$f" -ef "$MODABLE" ] && continue # don't copy MODABLE file
 		if ! grep -q "$f" "$MODABLE"; then
-			cp --preserve=mode "$f" "$WD/$f"
+			cp --preserve=mode "$f" "$WD/$f" 2>/dev/null \
+			|| { echo "Directory structure seems modified" >&2; break; }
 		fi
 	done
 
