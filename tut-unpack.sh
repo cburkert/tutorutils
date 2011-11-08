@@ -49,7 +49,13 @@ function errlog () {
 	[ -n "$verbose" ] && tee -a "$ERR" || cat >> "$ERR"
 }
 
-DST="$(eval echo \${$#})"
+DST="${!#}"
+if [ ! -d "$DST" -o ! -w "$DST" ]; then
+	echo "Error: last argument is the target directory but '$DST' is no"\
+		"directory or not writable" >&2
+	exit 24
+fi
+
 ERR="unpack-error.log"
 > "$ERR" # trunc logfile
 PATTERN="^asst[0-9]/[0-9]*/"
