@@ -341,8 +341,8 @@ while [ $leave -ne 1 ]; do
 	cp "$immno/`eval echo \"$SUMMARY\"`" "$WD"
 
 	if [ -n "$CORRECTGRP" ]; then
-		chgrp -R "$CORRECTGRP" "$BASE"
 		touch "$BOOKMARKS"
+		chgrp -R "$CORRECTGRP" "$BASE"
 		chmod -R g=rX "$BASE" # protect originals
 		chmod g+w "$BOOKMARKS" "$LAST" # writing bookmarks, saving last dir
 		chmod o+t "$BASE" # prevent bookmark file from deletion
