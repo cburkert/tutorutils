@@ -10,7 +10,7 @@
 USE_SCP="" # change to yes to use scp. Default: no.
 
 LISTEN_PORT=1234
-BACKUP_DEST="${1:-~/stud/tut_bs/backups}"
+BACKUP_DEST="${1:-$HOME/stud/tut_bs/backups}"
 
 # Options for scp
 SSH_PORT=8022
