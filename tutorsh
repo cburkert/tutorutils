@@ -6,12 +6,20 @@
 # at foreign source code.
 
 PROG="${0##*/}"
-VERSION="1.3"
+VERSION="1.4"
 
+set -e
+set -o pipefail
+trap unexpected_err ERR
 
 ##
 # Functions
 ##
+
+function unexpected_err() {
+	echo "An unexpected error has occured at line '$BASH_LINENO'. Please report." >&2
+	exit 99
+}
 
 function usage() {
 	cat <<-EOF
@@ -66,7 +74,7 @@ function chopPath() {
 	[ "${path:0:1}" != "/" ] && path="$PWD/$path"
 	[ "${path:0 - 1}" != "/" ] && path="$path/"
 	path="${path/\/.\///}" # remove useless dots
-	postPath="${path#*asst?/}"
+	postPath="${path##*/asst?/}"
 	BASE="${path%$postPath}"
 	BASE="${BASE%/}" # remove trailing slash
 	immno="${postPath%%/*}"
@@ -293,7 +301,6 @@ fi
 cd "$BASE"
 
 # start at the least immatricualation number if nothing else specified
-set -o pipefail
 if [ -z "$immno" ]; then
 	immno=`ls -d 1* | head -n 1`
 	if [ $? -ne 0 ]; then
@@ -320,7 +327,7 @@ if [ -n "$lastdir" ]; then
 fi
 chopPath "$next"
 
-let leave=0
+leave=0
 while [ $leave -ne 1 ]; do
 	immno="${next%%/*}"
 
@@ -399,19 +406,19 @@ while [ $leave -ne 1 ]; do
 	if [ -n "$workpath" -a ! -d "$workpath" ]; then
 		echo "couldn't find: $workpath"
 		# switch to parent dir which should exist
-		workpath="${workpath%/*}"
+		workpath=""
 	fi
 	cd "$workpath"
 
 	# start correction session
 	echo -e "export immno='$immno'\nexport PS1='$immno: \W\$ '" \
 		| cat "$RC" - > "$tmpRC"
+	ret=0
 	if [ -n "$CORRECTOR" ]; then
-		doas "bash --init-file '$tmpRC'" "$CORRECTOR"
+		doas "bash --init-file '$tmpRC'" "$CORRECTOR" || ret=$?
 	else
-		bash --init-file "$tmpRC"
+		bash --init-file "$tmpRC" || ret=$?
 	fi
-	ret=$?
 
 	# save modified files
 	cd "$WD"
