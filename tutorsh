@@ -365,12 +365,16 @@ while [ $leave -ne 1 ]; do
 	for d in `find . -type d`; do
 		mkdir -p "$WD/$d"
 	done
+	oldifs="$IFS"
+	IFS="
+" # prepare for white spaces in students' file names
 	for f in `find . -type f`; do
 		bn="${f##*/}"
 		[ ${bn:0:1} == "." -o "${bn:0 - 4}" == ".mod" ] && continue
 		[ -r "${f}.mod" ] && src="${f}.mod" || src="$f"
 		cp "$src" "$WD/$f"
 	done
+	IFS=$oldifs
 
 	# look for forbidden modifications
 	cd "$WD"
