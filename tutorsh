@@ -6,7 +6,7 @@
 # at foreign source code.
 
 PROG="${0##*/}"
-VERSION="1.4"
+VERSION="1.5"
 
 set -e
 set -o pipefail
@@ -395,7 +395,7 @@ while [ $leave -ne 1 ]; do
 		[ "$f" -ef "$MODABLE" ] && continue # don't copy MODABLE file
 		if ! grep -q "$f" "$MODABLE"; then
 			cp --preserve=mode "$f" "$WD/$f" 2>/dev/null \
-			|| { echo "Directory structure seems modified" >&2; break; }
+			|| { echo "Directory structure seems modified" >&2; }
 		fi
 	done
 
