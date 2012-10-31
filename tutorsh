@@ -331,9 +331,13 @@ leave=0
 while [ $leave -ne 1 ]; do
 	immno="${next%%/*}"
 
-	# setup workspace
-	rm -rf "$WD"
-	mkdir "$WD"
+	# setup workspace: empty or create if not present
+	if [ -d "$WD" ]; then
+		# change CWD to avoid removal of $WD itself
+		(cd "$WD" && find . -delete)
+	else
+		mkdir "$WD"
+	fi
 
 	# create summary file in student's directory (if needed)
 	if [ -n "$SUMTEMP" ]; then
