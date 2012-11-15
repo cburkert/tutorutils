@@ -6,11 +6,12 @@
 # at foreign source code.
 
 PROG="${0##*/}"
-VERSION="1.5"
+VERSION="1.6"
 
 set -e
 set -o pipefail
 trap unexpected_err ERR
+shopt -s extglob
 
 ##
 # Functions
@@ -74,6 +75,10 @@ function chopPath() {
 	[ "${path:0:1}" != "/" ] && path="$PWD/$path"
 	[ "${path:0 - 1}" != "/" ] && path="$path/"
 	path="${path/\/.\///}" # remove useless dots
+	# remove unnecessary .. out of the path
+	while grep -q "/../" <<<"$path"; do
+		path="${path/\/+([^\/])\/\.\./}" # substitute /x/a/../b/ like relpathes to /x/b
+	done
 	postPath="${path##*/asst?/}"
 	BASE="${path%$postPath}"
 	BASE="${BASE%/}" # remove trailing slash
@@ -394,14 +399,18 @@ while [ $leave -ne 1 ]; do
 
 	# copy suite into workspace and replace 'unmodifiable' files
 	cd "$SUITE"
+	modification_reported=""
 	for f in `find . -type f`; do
 		bn="${f##*/}" && [ ${bn:0:1} == "." ] && continue
 		[ "$f" -ef "$MODABLE" ] && continue # don't copy MODABLE file
 		if ! grep -q "$f" "$MODABLE"; then
 			cp --preserve=mode "$f" "$WD/$f" 2>/dev/null \
-			|| { echo "Directory structure seems modified" >&2; }
+			|| { [ -z "$modification_reported" ] \
+				&& echo "Directory structure seems modified" >&2 \
+				&& modification_reported="yes"; }
 		fi
 	done
+	modification_reported=""
 
 	# make WD group-writeable if CORRECTOR is used
 	[ -n "$CORRECTOR" ] && chmod -R g+rwX "$WD"
